@@ -202,8 +202,8 @@ func (c *PostgresConnector) IntrospectTable(ctx context.Context, tableName strin
 		WHERE table_schema = $1 AND table_name = $2`
 
 	var t tableRow
-	if err := c.db.GetContext(ctx, &t, tableQuery, c.schemaName, tableName); err != nil {
-		return nil, fmt.Errorf("table %q not found in schema %q: %w", tableName, c.schemaName, err)
+	if err := c.db.GetContext(ctx, &t, tableQuery, c.tableSchema(ctx), tableName); err != nil {
+		return nil, fmt.Errorf("table %q not found in schema %q: %w", tableName, c.tableSchema(ctx), err)
 	}
 
 	// Fetch columns for this specific table
@@ -309,12 +309,13 @@ func (c *PostgresConnector) IntrospectTable(ctx context.Context, tableName strin
 
 // GetTableNames returns a list of all table names in the configured schema.
 func (c *PostgresConnector) GetTableNames(ctx context.Context) ([]string, error) {
+	// A schema version serves its tables as views
 	const query = `SELECT table_name FROM information_schema.tables
-		WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+		WHERE table_schema = $1 AND (table_type = 'BASE TABLE' OR ($1 <> $2 AND table_type = 'VIEW'))
 		ORDER BY table_name`
 
 	var names []string
-	if err := c.db.SelectContext(ctx, &names, query, c.schemaName); err != nil {
+	if err := c.db.SelectContext(ctx, &names, query, c.tableSchema(ctx), c.schemaName); err != nil {
 		return nil, fmt.Errorf("get table names: %w", err)
 	}
 	return names, nil
@@ -354,7 +355,7 @@ func (c *PostgresConnector) fetchTables(ctx context.Context) ([]tableRow, error)
 		ORDER BY table_name`
 
 	var rows []tableRow
-	if err := c.db.SelectContext(ctx, &rows, query, c.schemaName); err != nil {
+	if err := c.db.SelectContext(ctx, &rows, query, c.tableSchema(ctx)); err != nil {
 		return nil, err
 	}
 	return rows, nil
@@ -373,7 +374,7 @@ func (c *PostgresConnector) fetchColumns(ctx context.Context, tableName string) 
 		FROM information_schema.columns c
 		WHERE c.table_schema = $1`
 
-	args := []interface{}{c.schemaName}
+	args := []interface{}{c.tableSchema(ctx)}
 
 	if tableName != "" {
 		query += ` AND c.table_name = $2`

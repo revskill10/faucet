@@ -53,6 +53,15 @@ func (c *PostgresConnector) Connect(cfg connector.ConnectionConfig) error {
 	return nil
 }
 
+// tableSchema is the schema a request's tables are in: the version it chose,
+// else the service's schema.
+func (c *PostgresConnector) tableSchema(ctx context.Context) string {
+	if s := connector.RequestSchema(ctx); s != "" {
+		return s
+	}
+	return c.schemaName
+}
+
 // BeginTx starts a new database transaction with the given options.
 func (c *PostgresConnector) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sqlx.Tx, error) {
 	return c.db.BeginTxx(ctx, opts)

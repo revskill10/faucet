@@ -27,8 +27,10 @@ import (
 
 type identityEnv struct {
 	*testEnv
-	key ed25519.PrivateKey
+	key    ed25519.PrivateKey
 	apiKey string
+	schema string
+	dsn    string
 }
 
 func newIdentityEnv(t *testing.T, required bool) *identityEnv {
@@ -79,12 +81,12 @@ func newIdentityEnv(t *testing.T, required bool) *identityEnv {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	svc := &model.ServiceConfig{Name: "notes", Driver: "postgres", DSN: dsn, Schema: schema, IsActive: true, Pool: model.DefaultPoolConfig(),
 		Identity: &model.IdentityConfig{PublicKeys: []string{base64.RawURLEncoding.EncodeToString(pub)}, Audience: "platform", Required: required,
-			Role: "faucet_identity_member", Settings: map[string]string{"sub": "app.user_id"}}}
+			Role: "faucet_identity_member", Settings: map[string]string{"sub": "app.user_id"}, SchemaClaim: "schema"}}
 	if err := env.store.CreateService(context.Background(), svc); err != nil {
 		t.Fatalf("CreateService: %v", err)
 	}
 	_, key := env.createRoleWithKey(t, "member", true, []model.RoleAccess{accessRule("notes", "*", model.VerbAll)})
-	return &identityEnv{testEnv: env, key: priv, apiKey: key}
+	return &identityEnv{testEnv: env, key: priv, apiKey: key, schema: schema, dsn: dsn}
 }
 
 func signIdentity(key ed25519.PrivateKey, claims map[string]any) string {
@@ -214,5 +216,54 @@ func TestIdentity_AdminAPIValidatesTheConfiguration(t *testing.T) {
 	// A refused change leaves the service as it was
 	if svc, _ := env.store.GetServiceByName(context.Background(), "mydb"); svc.Identity != nil {
 		t.Fatalf("identity stored despite the refusal: %+v", svc.Identity)
+	}
+}
+
+// A version of the service's schema (as pgroll serves one during a migration: views over the tables, here renaming
+// body to text) is chosen per request by the identity's schema claim; row-level security still applies through the
+// views, procedures stay on the service's schema, and only existing versions of that schema are accepted.
+func TestIdentity_SchemaClaimChoosesAVersionOfTheSchema(t *testing.T) {
+	e := newIdentityEnv(t, true)
+	admin, err := sqlx.Connect("pgx", e.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	v2 := e.schema + "_v2"
+	t.Cleanup(func() { _, _ = admin.Exec(`DROP SCHEMA IF EXISTS ` + v2 + ` CASCADE`) })
+	for _, s := range []string{
+		`CREATE SCHEMA ` + v2,
+		`CREATE VIEW ` + v2 + `.notes WITH (security_invoker = true) AS SELECT id, owner, body AS text FROM ` + e.schema + `.notes`,
+		`GRANT USAGE ON SCHEMA ` + v2 + ` TO faucet_identity_member`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON ` + v2 + `.notes TO faucet_identity_member`,
+	} {
+		if _, err := admin.Exec(s); err != nil {
+			t.Fatalf("prepare version: %v\n%s", err, s)
+		}
+	}
+	as := func(user, schema string) string {
+		return signIdentity(e.key, map[string]any{"sub": user, "aud": "platform", "exp": time.Now().Add(time.Minute).Unix(), "schema": schema})
+	}
+	// The version's columns, and only alice's rows
+	if code, resp := e.call(t, "GET", "/_table/notes?order=id", as("alice", v2), nil); code != http.StatusOK || column(resp, "text") != "a1,a2" {
+		t.Fatalf("alice on v2: %d %v", code, resp)
+	}
+	// Written through the version, read back through the service's schema
+	if code, resp := e.call(t, "POST", "/_table/notes", as("alice", v2), map[string]any{"resource": []any{map[string]any{"owner": "alice", "text": "a3"}}}); code != http.StatusOK && code != http.StatusCreated {
+		t.Fatalf("insert on v2: %d %v", code, resp)
+	}
+	if code, resp := e.call(t, "GET", "/_table/notes?order=id", as("alice", e.schema), nil); code != http.StatusOK || column(resp, "body") != "a1,a2,a3" {
+		t.Fatalf("alice on the schema: %d %v", code, resp)
+	}
+	// Procedures stay on the service's schema
+	if code, resp := e.call(t, "POST", "/_proc/whoami", as("alice", v2), map[string]any{}); code != http.StatusOK || !strings.Contains(fmt.Sprint(resp), "user_id:alice") {
+		t.Fatalf("whoami on v2: %d %v", code, resp)
+	}
+	// A version that does not exist, or another schema altogether, is refused
+	if code, _ := e.call(t, "GET", "/_table/notes", as("alice", e.schema+"_v9"), nil); code != http.StatusConflict {
+		t.Fatalf("missing version: %d", code)
+	}
+	if code, _ := e.call(t, "GET", "/_table/notes", as("alice", "pg_catalog"), nil); code != http.StatusUnauthorized {
+		t.Fatalf("foreign schema: %d", code)
 	}
 }

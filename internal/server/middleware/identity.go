@@ -65,6 +65,15 @@ func RequestIdentity(store *config.Store, registry *connector.Registry) func(htt
 				writeAuthError(w, http.StatusUnauthorized, "Invalid identity", nil)
 				return
 			}
+			base := svc.Schema
+			if base == "" {
+				base = "public"
+			}
+			schema, err := identity.SchemaVersion(cfg, claims, base)
+			if err != nil {
+				writeAuthError(w, http.StatusUnauthorized, "Invalid identity", nil)
+				return
+			}
 			conn, err := registry.Get(serviceName)
 			if err != nil {
 				// The handler reports why the service is unavailable
@@ -90,8 +99,18 @@ func RequestIdentity(store *config.Store, registry *connector.Registry) func(htt
 				}
 			}
 
+			ctx := connector.WithRequestTx(r.Context(), tx)
+			if schema != "" {
+				var exists bool
+				if err := tx.GetContext(r.Context(), &exists, "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)", schema); err != nil || !exists {
+					writeAuthError(w, http.StatusConflict, "Schema version not available: "+schema, nil)
+					return
+				}
+				ctx = connector.WithSchema(ctx, schema)
+			}
+
 			held := &heldResponse{header: http.Header{}, status: http.StatusOK}
-			next.ServeHTTP(held, r.WithContext(connector.WithRequestTx(r.Context(), tx)))
+			next.ServeHTTP(held, r.WithContext(ctx))
 			if held.status < 400 {
 				if err := tx.Commit(); err != nil {
 					writeAuthError(w, http.StatusConflict, "The request's changes could not be committed", nil)

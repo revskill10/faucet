@@ -172,7 +172,38 @@ func Validate(cfg *model.IdentityConfig, driver string) error {
 	if cfg.LeewaySeconds < 0 || cfg.LeewaySeconds > 300 {
 		return errors.New("identity leeway_seconds must be 0 to 300")
 	}
+	if cfg.SchemaClaim != "" && !claimName.MatchString(cfg.SchemaClaim) {
+		return errors.New("identity schema_claim must be a simple claim name")
+	}
 	return nil
+}
+
+var claimName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
+var versionName = regexp.MustCompile(`^[a-z0-9_]{1,40}$`)
+
+// SchemaVersion is the schema a request's tables are read and written in, as
+// its token chooses (cfg.SchemaClaim): "" for the service's schema base, or
+// base itself, or one of its versions "<base>_<version>". Anything else is
+// refused.
+func SchemaVersion(cfg *model.IdentityConfig, claims Claims, base string) (string, error) {
+	if cfg == nil || cfg.SchemaClaim == "" {
+		return "", nil
+	}
+	raw, present := claims[cfg.SchemaClaim]
+	if !present || raw == nil {
+		return "", nil
+	}
+	schema, ok := raw.(string)
+	if !ok {
+		return "", errors.New("schema claim must be a string")
+	}
+	if schema == "" || schema == base {
+		return "", nil
+	}
+	if !strings.HasPrefix(schema, base+"_") || !versionName.MatchString(strings.TrimPrefix(schema, base+"_")) || len(schema) > 63 {
+		return "", fmt.Errorf("schema %q is not a version of %q", schema, base)
+	}
+	return schema, nil
 }
 
 var settingName = regexp.MustCompile(`^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$`)

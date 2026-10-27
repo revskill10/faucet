@@ -13,6 +13,19 @@ import (
 // executor through Executor, and open nested units of work with BeginScope.
 
 type requestTxKey struct{}
+type requestSchemaKey struct{}
+
+// WithSchema has the request's table reads and writes use another schema of
+// the service (a version of its schema, see model.IdentityConfig.SchemaClaim).
+func WithSchema(ctx context.Context, schema string) context.Context {
+	return context.WithValue(ctx, requestSchemaKey{}, schema)
+}
+
+// RequestSchema is the schema chosen for the request's tables, or "".
+func RequestSchema(ctx context.Context) string {
+	s, _ := ctx.Value(requestSchemaKey{}).(string)
+	return s
+}
 
 // requestTx is the request's transaction and the savepoints opened in it.
 type requestTx struct {

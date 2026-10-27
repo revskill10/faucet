@@ -28,6 +28,12 @@ type IdentityConfig struct {
 	Settings map[string]string `json:"settings,omitempty"`
 	// LeewaySeconds tolerates clock skew when checking exp and nbf. Defaults to 30.
 	LeewaySeconds int `json:"leeway_seconds,omitempty"`
+	// SchemaClaim names the claim choosing the schema version a request's
+	// table reads and writes use: the service's schema, or one of its versions
+	// "<schema>_<version>" (such as the versioned schemas of pgroll, serving
+	// old and new clients during a migration). Procedures, keys and schema
+	// changes stay on the service's schema. Unset or absent: the service's schema.
+	SchemaClaim string `json:"schema_claim,omitempty"`
 }
 
 // IdentityHeader is the header a token is read from when none is configured.

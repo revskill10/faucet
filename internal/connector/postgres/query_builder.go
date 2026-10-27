@@ -13,7 +13,7 @@ import (
 // BuildSelect constructs a SELECT query from the given request.
 // It quotes all identifiers, applies field selection, filtering, ordering,
 // and pagination using PostgreSQL $N parameter placeholders.
-func (c *PostgresConnector) BuildSelect(_ context.Context, req connector.SelectRequest) (string, []interface{}, error) {
+func (c *PostgresConnector) BuildSelect(ctx context.Context, req connector.SelectRequest) (string, []interface{}, error) {
 	if req.Table == "" {
 		return "", nil, fmt.Errorf("table name is required")
 	}
@@ -29,7 +29,7 @@ func (c *PostgresConnector) BuildSelect(_ context.Context, req connector.SelectR
 
 	// FROM clause
 	b.WriteString(" FROM ")
-	b.WriteString(c.QuoteIdentifier(c.schemaName))
+	b.WriteString(c.QuoteIdentifier(c.tableSchema(ctx)))
 	b.WriteString(".")
 	b.WriteString(c.QuoteIdentifier(req.Table))
 
@@ -72,7 +72,7 @@ func (c *PostgresConnector) BuildSelect(_ context.Context, req connector.SelectR
 // It supports batch inserts with multiple value rows. All column names are
 // derived from the first record, and subsequent records must have the same
 // columns.
-func (c *PostgresConnector) BuildInsert(_ context.Context, req connector.InsertRequest) (string, []interface{}, error) {
+func (c *PostgresConnector) BuildInsert(ctx context.Context, req connector.InsertRequest) (string, []interface{}, error) {
 	if req.Table == "" {
 		return "", nil, fmt.Errorf("table name is required")
 	}
@@ -95,7 +95,7 @@ func (c *PostgresConnector) BuildInsert(_ context.Context, req connector.InsertR
 
 	// INSERT INTO
 	b.WriteString("INSERT INTO ")
-	b.WriteString(c.QuoteIdentifier(c.schemaName))
+	b.WriteString(c.QuoteIdentifier(c.tableSchema(ctx)))
 	b.WriteString(".")
 	b.WriteString(c.QuoteIdentifier(req.Table))
 
@@ -136,7 +136,7 @@ func (c *PostgresConnector) BuildInsert(_ context.Context, req connector.InsertR
 // It supports both filter-based and ID-based updates. When IDs are provided
 // without a filter, the first primary key column would need to be specified;
 // for now, IDs are applied as an IN clause on the "id" column by convention.
-func (c *PostgresConnector) BuildUpdate(_ context.Context, req connector.UpdateRequest) (string, []interface{}, error) {
+func (c *PostgresConnector) BuildUpdate(ctx context.Context, req connector.UpdateRequest) (string, []interface{}, error) {
 	if req.Table == "" {
 		return "", nil, fmt.Errorf("table name is required")
 	}
@@ -160,7 +160,7 @@ func (c *PostgresConnector) BuildUpdate(_ context.Context, req connector.UpdateR
 
 	// UPDATE
 	b.WriteString("UPDATE ")
-	b.WriteString(c.QuoteIdentifier(c.schemaName))
+	b.WriteString(c.QuoteIdentifier(c.tableSchema(ctx)))
 	b.WriteString(".")
 	b.WriteString(c.QuoteIdentifier(req.Table))
 
@@ -209,7 +209,7 @@ func (c *PostgresConnector) BuildUpdate(_ context.Context, req connector.UpdateR
 
 // BuildDelete constructs a DELETE query with parameterized WHERE conditions.
 // It supports both filter-based and ID-based deletes.
-func (c *PostgresConnector) BuildDelete(_ context.Context, req connector.DeleteRequest) (string, []interface{}, error) {
+func (c *PostgresConnector) BuildDelete(ctx context.Context, req connector.DeleteRequest) (string, []interface{}, error) {
 	if req.Table == "" {
 		return "", nil, fmt.Errorf("table name is required")
 	}
@@ -226,7 +226,7 @@ func (c *PostgresConnector) BuildDelete(_ context.Context, req connector.DeleteR
 
 	// DELETE FROM
 	b.WriteString("DELETE FROM ")
-	b.WriteString(c.QuoteIdentifier(c.schemaName))
+	b.WriteString(c.QuoteIdentifier(c.tableSchema(ctx)))
 	b.WriteString(".")
 	b.WriteString(c.QuoteIdentifier(req.Table))
 
@@ -255,7 +255,7 @@ func (c *PostgresConnector) BuildDelete(_ context.Context, req connector.DeleteR
 }
 
 // BuildCount constructs a SELECT COUNT(*) query with optional filtering.
-func (c *PostgresConnector) BuildCount(_ context.Context, req connector.CountRequest) (string, []interface{}, error) {
+func (c *PostgresConnector) BuildCount(ctx context.Context, req connector.CountRequest) (string, []interface{}, error) {
 	if req.Table == "" {
 		return "", nil, fmt.Errorf("table name is required")
 	}
@@ -263,7 +263,7 @@ func (c *PostgresConnector) BuildCount(_ context.Context, req connector.CountReq
 	var b strings.Builder
 
 	b.WriteString("SELECT COUNT(*) FROM ")
-	b.WriteString(c.QuoteIdentifier(c.schemaName))
+	b.WriteString(c.QuoteIdentifier(c.tableSchema(ctx)))
 	b.WriteString(".")
 	b.WriteString(c.QuoteIdentifier(req.Table))
 
