@@ -5,24 +5,27 @@ import "time"
 // ServiceConfig holds the configuration for a database service connection.
 // Each service maps to one database and is exposed as an API namespace.
 type ServiceConfig struct {
-	ID        int64      `json:"id" db:"id"`
-	Name      string     `json:"name" db:"name"`
-	Label     string     `json:"label" db:"label"`
-	Driver    string     `json:"driver" db:"driver"` // postgres, mysql, mssql, oracle, snowflake, sqlite
-	DSN            string `json:"dsn,omitempty" db:"dsn"` // Accepted on input; omitted in list responses via serviceToMap
-	PrivateKeyPath string `json:"private_key_path,omitempty" db:"private_key_path"`
-	Schema         string `json:"schema" db:"schema_name"`
-	ReadOnly   bool   `json:"read_only" db:"read_only"`
-	RawSQL     bool   `json:"raw_sql_allowed" db:"raw_sql_allowed"`
-	IsActive   bool   `json:"is_active" db:"is_active"`
-	SchemaLock string `json:"schema_lock" db:"schema_lock"`
-	Pool      PoolConfig `json:"pool"`
+	ID             int64      `json:"id" db:"id"`
+	Name           string     `json:"name" db:"name"`
+	Label          string     `json:"label" db:"label"`
+	Driver         string     `json:"driver" db:"driver"`     // postgres, mysql, mssql, oracle, snowflake, sqlite
+	DSN            string     `json:"dsn,omitempty" db:"dsn"` // Accepted on input; omitted in list responses via serviceToMap
+	PrivateKeyPath string     `json:"private_key_path,omitempty" db:"private_key_path"`
+	Schema         string     `json:"schema" db:"schema_name"`
+	ReadOnly       bool       `json:"read_only" db:"read_only"`
+	RawSQL         bool       `json:"raw_sql_allowed" db:"raw_sql_allowed"`
+	IsActive       bool       `json:"is_active" db:"is_active"`
+	SchemaLock     string     `json:"schema_lock" db:"schema_lock"`
+	Pool           PoolConfig `json:"pool"`
+	// Identity, for PostgreSQL services, carries each request's signed identity
+	// into the database (see IdentityConfig). Nil leaves requests as they are.
+	Identity *IdentityConfig `json:"identity,omitempty"`
 	// Connection holds individual connection fields (host, port, user, ...).
 	// It is an input-only alternative to DSN: when DSN is empty the server
 	// builds one from these fields. It is never persisted.
 	Connection *ConnectionParams `json:"connection,omitempty" db:"-"`
-	CreatedAt time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at" db:"updated_at"`
+	CreatedAt  time.Time         `json:"created_at" db:"created_at"`
+	UpdatedAt  time.Time         `json:"updated_at" db:"updated_at"`
 }
 
 // PoolConfig controls the database connection pool behavior for a service.

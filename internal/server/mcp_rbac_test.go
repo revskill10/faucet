@@ -456,3 +456,30 @@ func TestPausedAndFailedServicesExplainThemselves(t *testing.T) {
 		t.Errorf("readyz body = %s", rr.Body.String())
 	}
 }
+
+// A service that requires a per-request identity refuses tool calls, which
+// carry none, even for a role with full access to it.
+func TestMCPEndpoint_E2E_IdentityRequiredServiceRefusesTools(t *testing.T) {
+	env := setupMCPRBACEnv(t)
+	svc, err := env.store.GetServiceByName(context.Background(), mcpRBACService)
+	if err != nil {
+		t.Fatalf("GetServiceByName: %v", err)
+	}
+	svc.Identity = &model.IdentityConfig{Required: true}
+	if err := env.store.UpdateService(context.Background(), svc); err != nil {
+		t.Fatalf("UpdateService: %v", err)
+	}
+	memberKey := createRoleWithKey(t, env, "mcp-identity", "faucet_mcp_rbac_identity_key_0001", []model.RoleAccess{
+		{ServiceName: mcpRBACService, Component: "*", VerbMask: model.VerbAll},
+	})
+	ts := httptest.NewServer(env.server.Router())
+	t.Cleanup(ts.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	c := newMCPAPIKeyClient(t, ctx, ts.URL, memberKey)
+	res, text := callTool(t, ctx, c, "faucet_query", map[string]interface{}{"service": mcpRBACService, "table": "users"})
+	if !res.IsError || !strings.Contains(text, "requires a per-request identity") {
+		t.Errorf("faucet_query on an identity-required service: IsError=%v text=%q", res.IsError, text)
+	}
+}

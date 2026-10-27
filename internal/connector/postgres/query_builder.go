@@ -480,7 +480,8 @@ func (c *PostgresConnector) CallProcedure(ctx context.Context, name string, para
 		strings.Join(placeholders, ", "),
 	)
 
-	rows, err := c.db.QueryxContext(ctx, query, args...)
+	// Inside a request's transaction (a per-request identity), the call sees its settings
+	rows, err := connector.Executor(ctx, c.db).QueryxContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("call procedure %q: %w", name, err)
 	}

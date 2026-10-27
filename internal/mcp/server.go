@@ -131,10 +131,21 @@ func (s *MCPServer) HTTPHandler() http.Handler {
 func (s *MCPServer) authorize(ctx context.Context, service, component string, verb int) *mcp.CallToolResult {
 	principal := rbac.PrincipalFromContext(ctx)
 	err := s.enforcer.Authorize(ctx, principal, service, component, verb)
-	if err == nil {
-		return nil
+	if err != nil {
+		return authorizationError(err)
 	}
-	return authorizationError(err)
+	// A service that requires a per-request identity (model.IdentityConfig) is
+	// not open to tool calls, which carry none; admins keep their access.
+	if principal != nil && !principal.IsAdmin {
+		svc, err := s.store.GetServiceByName(ctx, service)
+		if err != nil && !errors.Is(err, config.ErrNotFound) {
+			return mcp.NewToolResultError(fmt.Sprintf("Authorization check failed: %v", err))
+		}
+		if err == nil && svc.Identity != nil && svc.Identity.Required {
+			return mcp.NewToolResultError("Forbidden: service " + service + " requires a per-request identity, which tool calls do not carry")
+		}
+	}
+	return nil
 }
 
 // authorizationError converts an error returned by the rbac package into a

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/jmoiron/sqlx"
 
 	"github.com/faucetdb/faucet/internal/config"
 	"github.com/faucetdb/faucet/internal/connector"
@@ -169,7 +168,7 @@ func (h *TableHandler) QueryRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db := conn.DB()
+	db := connector.Executor(r.Context(), conn.DB())
 	rows, err := db.QueryxContext(r.Context(), sqlStr, args...)
 	if err != nil {
 		code, msg := classifyDBError(err, "Query failed")
@@ -297,15 +296,15 @@ func (h *TableHandler) CreateRecords(w http.ResponseWriter, r *http.Request) {
 
 	// Choose executor: transaction for rollback mode, raw DB otherwise.
 	var exec connector.QueryExecutor
-	exec = conn.DB()
+	exec = connector.Executor(r.Context(), conn.DB())
 	if mode == BatchModeRollback {
-		tx, err := conn.BeginTx(r.Context(), nil)
+		tx, err := connector.BeginScope(r.Context(), conn)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to begin transaction: "+err.Error())
 			return
 		}
 		defer func() { _ = tx.Rollback() }()
-		exec = tx
+		exec = tx.Exec
 
 		// Execute + commit in rollback mode.
 		created, err := execInsert(r.Context(), exec, conn, sqlStr, args)
@@ -336,7 +335,7 @@ func (h *TableHandler) CreateRecords(w http.ResponseWriter, r *http.Request) {
 
 // createRecordsContinue inserts each record individually, collecting successes and errors.
 func (h *TableHandler) createRecordsContinue(w http.ResponseWriter, r *http.Request, conn connector.Connector, tableName string, records []map[string]interface{}, start time.Time) {
-	db := conn.DB()
+	db := connector.Executor(r.Context(), conn.DB())
 	results := make([]interface{}, len(records))
 	var errIndices []int
 	succeeded := 0
@@ -353,36 +352,14 @@ func (h *TableHandler) createRecordsContinue(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 
-		if conn.SupportsReturning() {
-			rows, err := db.QueryxContext(r.Context(), sqlStr, args...)
-			if err != nil {
-				code, msg := classifyDBError(err, "Insert failed")
-				results[i] = map[string]interface{}{"error": model.ErrorDetail{Code: code, Message: msg}}
-				errIndices = append(errIndices, i)
-				continue
-			}
-			row := make(map[string]interface{})
-			if rows.Next() {
-				if err := rows.MapScan(row); err != nil {
-					rows.Close()
-					results[i] = map[string]interface{}{"error": model.ErrorDetail{Code: 500, Message: "Failed to scan result: " + err.Error()}}
-					errIndices = append(errIndices, i)
-					continue
-				}
-				cleanMapValues(row)
-			}
-			rows.Close()
-			results[i] = row
-		} else {
-			_, err := db.ExecContext(r.Context(), sqlStr, args...)
-			if err != nil {
-				code, msg := classifyDBError(err, "Insert failed")
-				results[i] = map[string]interface{}{"error": model.ErrorDetail{Code: code, Message: msg}}
-				errIndices = append(errIndices, i)
-				continue
-			}
-			results[i] = rec
+		created, err := insertOne(r.Context(), conn, db, sqlStr, args, rec)
+		if err != nil {
+			code, msg := classifyDBError(err, "Insert failed")
+			results[i] = map[string]interface{}{"error": model.ErrorDetail{Code: code, Message: msg}}
+			errIndices = append(errIndices, i)
+			continue
 		}
+		results[i] = created
 		succeeded++
 	}
 
@@ -401,6 +378,36 @@ func (h *TableHandler) createRecordsContinue(w http.ResponseWriter, r *http.Requ
 			TookMs:    float64(took.Microseconds()) / 1000.0,
 		},
 	})
+}
+
+// insertOne inserts one record of a "continue" batch on its own (a savepoint
+// inside the request's transaction), returning the created row, or the input
+// record when the database cannot return it.
+func insertOne(ctx context.Context, conn connector.Connector, exec connector.QueryExecutor, sqlStr string, args []interface{}, rec map[string]interface{}) (map[string]interface{}, error) {
+	var created map[string]interface{}
+	err := connector.Isolate(ctx, conn, exec, func(exec connector.QueryExecutor) error {
+		if !conn.SupportsReturning() {
+			if _, err := exec.ExecContext(ctx, sqlStr, args...); err != nil {
+				return err
+			}
+			created = rec
+			return nil
+		}
+		rows, err := exec.QueryxContext(ctx, sqlStr, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		created = make(map[string]interface{})
+		if rows.Next() {
+			if err := rows.MapScan(created); err != nil {
+				return err
+			}
+			cleanMapValues(created)
+		}
+		return rows.Err()
+	})
+	return created, err
 }
 
 // execInsert executes an INSERT statement and returns created records (if RETURNING is supported)
@@ -487,17 +494,17 @@ func (h *TableHandler) ReplaceRecords(w http.ResponseWriter, r *http.Request) {
 
 	// Choose executor: transaction for rollback mode, raw DB otherwise.
 	var exec connector.QueryExecutor
-	var tx *sqlx.Tx
-	exec = conn.DB()
+	var tx *connector.Scope
+	exec = connector.Executor(r.Context(), conn.DB())
 
 	if mode == BatchModeRollback {
-		tx, err = conn.BeginTx(r.Context(), nil)
+		tx, err = connector.BeginScope(r.Context(), conn)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to begin transaction: "+err.Error())
 			return
 		}
 		defer func() { _ = tx.Rollback() }()
-		exec = tx
+		exec = tx.Exec
 	}
 
 	// For continue mode, collect per-record results.
@@ -508,7 +515,12 @@ func (h *TableHandler) ReplaceRecords(w http.ResponseWriter, r *http.Request) {
 
 		for i, record := range records {
 			ids, filter := extractIDsOrFilter(record, r)
-			result, err := execSingleUpdate(r.Context(), exec, conn, tableName, record, filter, ids)
+			var result map[string]interface{}
+			err := connector.Isolate(r.Context(), conn, exec, func(exec connector.QueryExecutor) error {
+				var err error
+				result, err = execSingleUpdate(r.Context(), exec, conn, tableName, record, filter, ids)
+				return err
+			})
 			if err != nil {
 				code, msg := classifyDBError(err, "Update failed")
 				results[i] = map[string]interface{}{"error": model.ErrorDetail{Code: code, Message: msg}}
@@ -694,17 +706,17 @@ func (h *TableHandler) UpdateRecords(w http.ResponseWriter, r *http.Request) {
 	// Choose executor: transaction for rollback mode, raw DB otherwise.
 	mode := parseBatchMode(r)
 	var exec connector.QueryExecutor
-	var tx *sqlx.Tx
-	exec = conn.DB()
+	var tx *connector.Scope
+	exec = connector.Executor(r.Context(), conn.DB())
 
 	if mode == BatchModeRollback {
-		tx, err = conn.BeginTx(r.Context(), nil)
+		tx, err = connector.BeginScope(r.Context(), conn)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to begin transaction: "+err.Error())
 			return
 		}
 		defer func() { _ = tx.Rollback() }()
-		exec = tx
+		exec = tx.Exec
 	}
 
 	updated := make([]map[string]interface{}, 0)
@@ -841,17 +853,17 @@ func (h *TableHandler) DeleteRecords(w http.ResponseWriter, r *http.Request) {
 	// Choose executor: transaction for rollback mode, raw DB otherwise.
 	mode := parseBatchMode(r)
 	var exec connector.QueryExecutor
-	var tx *sqlx.Tx
-	exec = conn.DB()
+	var tx *connector.Scope
+	exec = connector.Executor(r.Context(), conn.DB())
 
 	if mode == BatchModeRollback {
-		tx, err = conn.BeginTx(r.Context(), nil)
+		tx, err = connector.BeginScope(r.Context(), conn)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "Failed to begin transaction: "+err.Error())
 			return
 		}
 		defer func() { _ = tx.Rollback() }()
-		exec = tx
+		exec = tx.Exec
 	}
 
 	result, err := exec.ExecContext(r.Context(), sqlStr, args...)

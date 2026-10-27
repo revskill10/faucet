@@ -94,6 +94,9 @@ func (s *Store) migrate() error {
 
 		// v5: Schema lock mode per service (none, auto, strict).
 		`ALTER TABLE services ADD COLUMN schema_lock TEXT NOT NULL DEFAULT 'none'`,
+
+		// v6: Per-request identity for PostgreSQL services (model.IdentityConfig, as JSON; '' = none).
+		`ALTER TABLE services ADD COLUMN identity_config TEXT NOT NULL DEFAULT ''`,
 	}
 
 	for _, m := range migrations {

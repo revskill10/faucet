@@ -16,6 +16,7 @@ import (
 
 	"github.com/faucetdb/faucet/internal/config"
 	"github.com/faucetdb/faucet/internal/connector"
+	"github.com/faucetdb/faucet/internal/identity"
 	"github.com/faucetdb/faucet/internal/model"
 	"github.com/faucetdb/faucet/internal/service"
 )
@@ -288,6 +289,10 @@ func (h *SystemHandler) CreateService(w http.ResponseWriter, r *http.Request) {
 	if svc.SchemaLock == "" {
 		svc.SchemaLock = "none"
 	}
+	if err := identity.Validate(svc.Identity, svc.Driver); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid identity: "+err.Error())
+		return
+	}
 
 	// Sanitize the DSN to ensure special characters in passwords are properly
 	// URL-encoded for URL-style DSNs (postgres://, sqlserver://).
@@ -384,6 +389,14 @@ func (h *SystemHandler) UpdateService(w http.ResponseWriter, r *http.Request) {
 	}
 	if present["is_active"] {
 		existing.IsActive = updates.IsActive
+	}
+	// identity changes only when sent; null removes it
+	if present["identity"] {
+		existing.Identity = updates.Identity
+	}
+	if err := identity.Validate(existing.Identity, existing.Driver); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid identity: "+err.Error())
+		return
 	}
 
 	if err := h.store.UpdateService(r.Context(), existing); err != nil {
@@ -1211,6 +1224,10 @@ func serviceToMap(svc *model.ServiceConfig) map[string]interface{} {
 	// edit forms.
 	if svc.DSN != "" {
 		m["connection"] = connector.DescribeDSN(svc.Driver, svc.DSN)
+	}
+	// Public keys and claim mappings only: nothing secret
+	if svc.Identity != nil {
+		m["identity"] = svc.Identity
 	}
 	return m
 }

@@ -654,3 +654,30 @@ func TestNewStore_MemoryPragmas(t *testing.T) {
 		t.Errorf("busy_timeout = %d, want 5000", busy)
 	}
 }
+
+// A service's identity configuration is stored, read back, and removed with it set to nil.
+func TestServiceIdentityConfig(t *testing.T) {
+	store, err := NewStore("")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	identity := &model.IdentityConfig{PublicKeys: []string{"k"}, Audience: "platform", Required: true, Role: "member", Settings: map[string]string{"sub": "app.user_id"}}
+	svc := &model.ServiceConfig{Name: "pg", Driver: "postgres", DSN: "postgres://localhost/db", IsActive: true, Identity: identity}
+	if err := store.CreateService(ctx, svc); err != nil {
+		t.Fatalf("CreateService: %v", err)
+	}
+	got, err := store.GetServiceByName(ctx, "pg")
+	if err != nil || got.Identity == nil || got.Identity.Role != "member" || !got.Identity.Required || got.Identity.Settings["sub"] != "app.user_id" {
+		t.Fatalf("read back: %+v, %v", got, err)
+	}
+	got.Identity = nil
+	if err := store.UpdateService(ctx, got); err != nil {
+		t.Fatalf("UpdateService: %v", err)
+	}
+	if again, _ := store.GetServiceByName(ctx, "pg"); again.Identity != nil {
+		t.Fatalf("identity not removed: %+v", again.Identity)
+	}
+}
+

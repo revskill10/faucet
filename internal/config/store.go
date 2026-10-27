@@ -93,6 +93,7 @@ type serviceRow struct {
 	RawSQLAllowed     bool      `db:"raw_sql_allowed"`
 	IsActive          bool      `db:"is_active"`
 	SchemaLock        string    `db:"schema_lock"`
+	IdentityConfig    string    `db:"identity_config"`
 	MaxOpenConns      int       `db:"max_open_conns"`
 	MaxIdleConns      int       `db:"max_idle_conns"`
 	ConnMaxLifetimeMs int64     `db:"conn_max_lifetime_ms"`
@@ -118,6 +119,7 @@ func serviceRowFromModel(svc *model.ServiceConfig) serviceRow {
 		RawSQLAllowed:     svc.RawSQL,
 		IsActive:          svc.IsActive,
 		SchemaLock:        schemaLock,
+		IdentityConfig:    identityJSON(svc.Identity),
 		MaxOpenConns:      svc.Pool.MaxOpenConns,
 		MaxIdleConns:      svc.Pool.MaxIdleConns,
 		ConnMaxLifetimeMs: svc.Pool.ConnMaxLifetime.Milliseconds(),
@@ -146,9 +148,35 @@ func (r serviceRow) toModel() model.ServiceConfig {
 			ConnMaxLifetime: time.Duration(r.ConnMaxLifetimeMs) * time.Millisecond,
 			ConnMaxIdleTime: time.Duration(r.ConnMaxIdleTimeMs) * time.Millisecond,
 		},
+		Identity:  identityFromJSON(r.IdentityConfig),
 		CreatedAt: r.CreatedAt,
 		UpdatedAt: r.UpdatedAt,
 	}
+}
+
+// identityJSON stores a service's identity configuration; "" when there is none.
+func identityJSON(cfg *model.IdentityConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// identityFromJSON reads a stored identity configuration. An unreadable one is
+// treated as configured but unusable (no keys), so requests fail closed.
+func identityFromJSON(s string) *model.IdentityConfig {
+	if s == "" {
+		return nil
+	}
+	var cfg model.IdentityConfig
+	if err := json.Unmarshal([]byte(s), &cfg); err != nil {
+		return &model.IdentityConfig{Required: true}
+	}
+	return &cfg
 }
 
 // CreateService inserts a new service configuration. The ID, CreatedAt, and
@@ -161,11 +189,11 @@ func (s *Store) CreateService(ctx context.Context, svc *model.ServiceConfig) err
 	row := serviceRowFromModel(svc)
 
 	const q = `INSERT INTO services
-		(name, label, driver, dsn, private_key_path, schema_name, read_only, raw_sql_allowed, is_active, schema_lock,
+		(name, label, driver, dsn, private_key_path, schema_name, read_only, raw_sql_allowed, is_active, schema_lock, identity_config,
 		 max_open_conns, max_idle_conns, conn_max_lifetime_ms, conn_max_idle_time_ms,
 		 created_at, updated_at)
 		VALUES
-		(:name, :label, :driver, :dsn, :private_key_path, :schema_name, :read_only, :raw_sql_allowed, :is_active, :schema_lock,
+		(:name, :label, :driver, :dsn, :private_key_path, :schema_name, :read_only, :raw_sql_allowed, :is_active, :schema_lock, :identity_config,
 		 :max_open_conns, :max_idle_conns, :conn_max_lifetime_ms, :conn_max_idle_time_ms,
 		 :created_at, :updated_at)`
 
@@ -231,7 +259,7 @@ func (s *Store) UpdateService(ctx context.Context, svc *model.ServiceConfig) err
 	const q = `UPDATE services SET
 		name = :name, label = :label, driver = :driver, dsn = :dsn, private_key_path = :private_key_path,
 		schema_name = :schema_name, read_only = :read_only, raw_sql_allowed = :raw_sql_allowed,
-		is_active = :is_active, schema_lock = :schema_lock, max_open_conns = :max_open_conns,
+		is_active = :is_active, schema_lock = :schema_lock, identity_config = :identity_config, max_open_conns = :max_open_conns,
 		max_idle_conns = :max_idle_conns, conn_max_lifetime_ms = :conn_max_lifetime_ms,
 		conn_max_idle_time_ms = :conn_max_idle_time_ms, updated_at = :updated_at
 		WHERE id = :id`

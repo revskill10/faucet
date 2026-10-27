@@ -116,6 +116,7 @@ See the [Admin UI guide](https://wiki.faucetdb.ai/admin-ui) for a tour of every 
 - **JWT authentication** — HMAC-SHA256 signed tokens for admin sessions
 - **Role-based access control (RBAC)** — Per-table verb permissions (GET, POST, PUT, PATCH, DELETE)
 - **Row-level security filters** — Filter expressions are stored per access rule and returned by the API; applying them to queries is planned and not enforced yet
+- **Per-request identity (PostgreSQL)** — A signed token per request sets the person's claims in the database and switches role, so row-level security policies apply per person
 - **Schema contract locking** — Lock your API contract against silent breaking schema changes with three modes (none, auto, strict), drift detection, and CLI management
 
 ### AI Agent Integration (MCP)
@@ -382,6 +383,39 @@ curl -X PUT -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" 
 ```
 
 > Row-level `filters` on a rule are stored and returned by the API but are not yet applied to queries.
+
+### Per-request identity and row-level security (PostgreSQL)
+
+An API key says which application is calling; it does not say which person the call is for. A PostgreSQL service can
+also take a signed identity per request, so the database enforces row-level security for that person:
+
+```bash
+curl -X PUT -H "Authorization: Bearer $JWT" -H "Content-Type: application/json"   http://localhost:8080/api/v1/system/service/mydb -d '{
+    "identity": {
+      "public_keys": ["<Ed25519 public key, base64url>"],
+      "audience": "my-app",
+      "required": true,
+      "role": "app_member",
+      "settings": { "sub": "app.user_id" }
+    }
+  }'
+```
+
+The caller sends its API key as usual and the person's token in `X-Faucet-Identity` (or the configured `header`): a
+compact JWS signed with EdDSA by one of `public_keys`, with `exp` (and `aud` when `audience` is set). Faucet verifies it,
+then runs every statement of the request (table reads and writes, procedure calls) in one transaction that first:
+
+- sets every claim as JSON in `request.claims`, and each claim listed in `settings` under its setting name, all
+  transaction-local (`set_config(name, value, true)`), so pooled connections never carry one request's identity into the next;
+- switches to `role` (`SET LOCAL ROLE`), so policies apply even though Faucet connects as the tables' owner.
+
+Policies read the settings, for example
+`CREATE POLICY own ON notes USING (owner = current_setting('app.user_id', true))`. The transaction commits only when
+the request succeeds; the response is held until then, so a client never sees success for work that was not kept
+(streamed NDJSON responses are delivered whole). In `?continue=true` batches each record gets a savepoint, so one
+refused record does not undo the others. An invalid, expired or foreign token is refused with `401`; so is a request
+without one when `required` is set. MCP tool calls carry no identity, so a service that requires one refuses them for
+API keys. `"identity": null` removes the configuration. Admin sessions without a token are unaffected.
 
 **Upgrading.** Before this fix, role rules were stored but never enforced for API-key requests. Roles created with `faucet role create` that were never given rules will now be denied with `403` — grant them rules with `faucet role grant` or the admin UI. Roles created in the admin UI default to GET-only on all services, so API keys that previously wrote data through such roles now need `POST`/`PUT`/`PATCH`/`DELETE` granted explicitly. On startup `faucet serve` logs a warning for every role that has active API keys but would deny all requests (no rules, only `verb_mask: 0` rules, or inactive), together with the `faucet role grant` command that fixes it.
 

@@ -179,12 +179,15 @@ func (s *Server) setupRouter() {
 		// Dynamic database service APIs.
 		// Middleware order matters: authenticate, then enforce the role's
 		// access rules (verb_mask per service/component), then refuse
-		// writes to read-only services.
+		// writes to read-only services, then carry a per-request identity into
+		// the database (model.IdentityConfig).
 		enforcer := rbac.NewEnforcer(s.store)
 		r.Route("/{serviceName}", func(r chi.Router) {
 			r.Use(middleware.Authenticate(s.authSvc))
 			r.Use(middleware.RequireAccess(enforcer))
 			r.Use(middleware.ReadOnlyGuard(s.store))
+			// Last: a signed per-request identity runs the request in its own transaction
+			r.Use(middleware.RequestIdentity(s.store, s.registry))
 
 			tableHandler := handler.NewTableHandler(s.registry, s.store)
 			schemaHandler := handler.NewSchemaHandler(s.registry, s.store)
