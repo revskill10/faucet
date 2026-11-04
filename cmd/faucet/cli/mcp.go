@@ -82,8 +82,9 @@ func runMCP(transport string, port int) error {
 			ConnMaxLifetime: svc.Pool.ConnMaxLifetime,
 			ConnMaxIdleTime: svc.Pool.ConnMaxIdleTime,
 		}
-		if err := registry.Connect(svc.Name, cfg); err != nil {
-			logger.Error("failed to connect service", "service", svc.Name, "error", err)
+		// A database still starting is retried until it accepts connections
+		if err := registry.ConnectRetrying(svc.Name, cfg); err != nil {
+			logger.Error("failed to connect service; retrying", "service", svc.Name, "error", err)
 		} else {
 			logger.Info("connected service", "service", svc.Name, "driver", svc.Driver)
 		}

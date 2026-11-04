@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -385,5 +386,101 @@ func TestCloseAllClosesRetiringConnections(t *testing.T) {
 	r.CloseAll()
 	if !conns[0].disconnected || !conns[1].disconnected {
 		t.Error("CloseAll should close active and retiring connections")
+	}
+}
+
+// flakyConnector refuses its first failures connects (a database still starting), then connects.
+type flakyConnector struct {
+	mockConnector
+	attempts *atomic.Int64
+	failures int
+}
+
+func (f *flakyConnector) Connect(cfg ConnectionConfig) error {
+	n := f.attempts.Add(1)
+	if n <= int64(f.failures) {
+		return fmt.Errorf("connection refused (attempt %d)", n)
+	}
+	return f.mockConnector.Connect(cfg)
+}
+
+// fastRetries makes ConnectRetrying try again within milliseconds for the test.
+func fastRetries(t *testing.T) {
+	t.Helper()
+	first, max := reconnectFirst, reconnectMax
+	reconnectFirst, reconnectMax = 5*time.Millisecond, 20*time.Millisecond
+	t.Cleanup(func() { reconnectFirst, reconnectMax = first, max })
+}
+
+// eventually waits up to a second for check to hold.
+func eventually(t *testing.T, what string, check func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if check() {
+			return
+		}
+	}
+	t.Fatalf("not within a second: %s", what)
+}
+
+// A database woken together with Faucet refuses connections while it starts: the service connects once it accepts them,
+// with no edit (it stayed unconnected until one before, answering 503 to every request).
+func TestConnectRetryingConnectsOnceTheDatabaseAccepts(t *testing.T) {
+	fastRetries(t)
+	var attempts atomic.Int64
+	r := NewRegistry()
+	r.RegisterDriver("mock", func() Connector { return &flakyConnector{attempts: &attempts, failures: 3} })
+
+	if err := r.ConnectRetrying("svc", ConnectionConfig{Driver: "mock", DSN: "ok"}); err == nil {
+		t.Fatal("the first attempt should fail: the database is still starting")
+	}
+	if _, err := r.Get("svc"); !errors.Is(err, ErrServiceNotConnected) {
+		t.Fatalf("until it connects the service is not connected, got %v", err)
+	}
+	eventually(t, "the service connected", func() bool { _, err := r.Get("svc"); return err == nil })
+	if attempts.Load() != 4 {
+		t.Fatalf("connected on the fourth attempt, got %d attempts", attempts.Load())
+	}
+	// Connected: no further attempts
+	time.Sleep(50 * time.Millisecond)
+	if attempts.Load() != 4 {
+		t.Fatalf("retries continued after connecting: %d attempts", attempts.Load())
+	}
+}
+
+// Another change supersedes the retries: an operator's pause made while they run is never undone by them.
+func TestConnectRetryingStopsWhenSuperseded(t *testing.T) {
+	fastRetries(t)
+	var attempts atomic.Int64
+	r := NewRegistry()
+	r.RegisterDriver("mock", func() Connector { return &flakyConnector{attempts: &attempts, failures: 1_000_000} })
+
+	_ = r.ConnectRetrying("svc", ConnectionConfig{Driver: "mock", DSN: "ok"})
+	eventually(t, "a retry ran", func() bool { return attempts.Load() >= 2 })
+	r.Pause("svc")
+	seen := attempts.Load()
+	time.Sleep(60 * time.Millisecond)
+	if attempts.Load() > seen+1 { // one retry may have been under way when the pause landed
+		t.Fatalf("retries continued after a pause: %d attempts, %d when paused", attempts.Load(), seen)
+	}
+	if !r.State("svc").Paused {
+		t.Fatal("the pause was undone by a retry")
+	}
+}
+
+// After CloseAll (Faucet stopping) nothing reconnects.
+func TestConnectRetryingStopsWhenClosed(t *testing.T) {
+	fastRetries(t)
+	var attempts atomic.Int64
+	r := NewRegistry()
+	r.RegisterDriver("mock", func() Connector { return &flakyConnector{attempts: &attempts, failures: 1_000_000} })
+
+	_ = r.ConnectRetrying("svc", ConnectionConfig{Driver: "mock", DSN: "ok"})
+	eventually(t, "a retry ran", func() bool { return attempts.Load() >= 2 })
+	r.CloseAll()
+	seen := attempts.Load()
+	time.Sleep(60 * time.Millisecond)
+	if attempts.Load() > seen+1 {
+		t.Fatalf("retries continued after CloseAll: %d attempts, %d when closed", attempts.Load(), seen)
 	}
 }

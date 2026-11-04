@@ -25,6 +25,14 @@ var (
 // immediately.
 var retireDelay = 30 * time.Second
 
+// reconnectFirst and reconnectMax bound how often ConnectRetrying tries a
+// service again after its connect failed: first after reconnectFirst, then
+// twice as long each time, up to reconnectMax.
+var (
+	reconnectFirst = time.Second
+	reconnectMax   = 30 * time.Second
+)
+
 // ServiceState is the live state of a service in the registry.
 type ServiceState struct {
 	Connected bool
@@ -48,6 +56,7 @@ type Registry struct {
 	failed    map[string]string    // last connection error, by service name
 	gen       map[string]uint64    // per-service change counter; never reset
 	retiring  map[Connector]*time.Timer
+	closed    bool // CloseAll ran: nothing reconnects afterwards
 }
 
 // NewRegistry creates a new empty Registry.
@@ -80,6 +89,46 @@ func (r *Registry) RegisterDriver(driver string, factory Factory) {
 // was paused, deleted or reconnected while this call was connecting, its
 // result is discarded.
 func (r *Registry) Connect(serviceName string, cfg ConnectionConfig) error {
+	_, err := r.connect(serviceName, cfg)
+	return err
+}
+
+// ConnectRetrying connects like Connect and, if connecting fails, keeps
+// trying in the background (reconnectFirst, doubling up to reconnectMax) until
+// the service connects, another change to it (a connect, pause, failure or
+// delete) supersedes the attempt, or the registry is closed. A database that
+// is still starting when Faucet starts (both woken together after a rest) is
+// connected as soon as it accepts connections, instead of the service staying
+// unconnected until someone edits it.
+func (r *Registry) ConnectRetrying(serviceName string, cfg ConnectionConfig) error {
+	g, err := r.connect(serviceName, cfg)
+	if err != nil {
+		r.retryAfter(serviceName, cfg, g, reconnectFirst)
+	}
+	return err
+}
+
+// retryAfter connects the service again after wait, if it is still in the
+// failed state of generation g (nothing changed it since) and the registry
+// is open; failing again, it waits twice as long, up to reconnectMax.
+func (r *Registry) retryAfter(serviceName string, cfg ConnectionConfig, g uint64, wait time.Duration) {
+	time.AfterFunc(wait, func() {
+		r.mu.RLock()
+		current := r.gen[serviceName] == g && !r.closed
+		r.mu.RUnlock()
+		if !current {
+			return
+		}
+		next, err := r.connect(serviceName, cfg)
+		if err == nil {
+			return
+		}
+		r.retryAfter(serviceName, cfg, next, min(wait*2, reconnectMax))
+	})
+}
+
+// connect is Connect, also returning the generation of the change it made.
+func (r *Registry) connect(serviceName string, cfg ConnectionConfig) (uint64, error) {
 	r.mu.Lock()
 	r.gen[serviceName]++
 	g := r.gen[serviceName]
@@ -106,11 +155,11 @@ func (r *Registry) Connect(serviceName string, cfg ConnectionConfig) error {
 		if conn != nil {
 			conn.Disconnect()
 		}
-		return err
+		return g, err
 	}
 	if err != nil {
 		r.failLocked(serviceName, err)
-		return err
+		return g, err
 	}
 	if old, ok := r.active[serviceName]; ok {
 		r.retireLocked(old)
@@ -118,7 +167,7 @@ func (r *Registry) Connect(serviceName string, cfg ConnectionConfig) error {
 	r.active[serviceName] = conn
 	delete(r.paused, serviceName)
 	delete(r.failed, serviceName)
-	return nil
+	return g, nil
 }
 
 // Fail records that a service could not be connected and drops any existing
@@ -238,6 +287,7 @@ func (r *Registry) Disconnect(serviceName string) error {
 func (r *Registry) CloseAll() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.closed = true
 
 	for name, conn := range r.active {
 		conn.Disconnect()
