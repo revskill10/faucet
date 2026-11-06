@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -82,6 +83,8 @@ func RequestIdentity(store *config.Store, registry *connector.Registry) func(htt
 			}
 			tx, err := conn.BeginTx(r.Context(), nil)
 			if err != nil {
+				// The answer names no cause (driver errors can name internal hosts); the log keeps it for the operator
+				slog.Default().Error("identity transaction could not begin", "service", serviceName, "error", err)
 				writeAuthError(w, http.StatusServiceUnavailable, "Failed to begin transaction", nil)
 				return
 			}

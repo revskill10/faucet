@@ -390,6 +390,10 @@ func (h *SystemHandler) UpdateService(w http.ResponseWriter, r *http.Request) {
 	if present["is_active"] {
 		existing.IsActive = updates.IsActive
 	}
+	// pool changes only when sent; a field left out (zero) takes the default when connecting
+	if present["pool"] {
+		existing.Pool = updates.Pool
+	}
 	// identity changes only when sent; null removes it
 	if present["identity"] {
 		existing.Identity = updates.Identity

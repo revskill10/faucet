@@ -484,3 +484,24 @@ func TestConnectRetryingStopsWhenClosed(t *testing.T) {
 		t.Fatalf("retries continued after CloseAll: %d attempts, %d when closed", attempts.Load(), seen)
 	}
 }
+
+// A service with no pool (created through the API) connects with the default
+// pool, not database/sql's two idle connections; a pool it sets is kept.
+func TestConnectFillsPoolDefaults(t *testing.T) {
+	r := NewRegistry()
+	mc := &mockConnector{}
+	r.RegisterDriver("mock", func() Connector { return mc })
+	if err := r.Connect("svc", ConnectionConfig{Driver: "mock", DSN: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	d := model.DefaultPoolConfig()
+	if mc.cfg.MaxOpenConns != d.MaxOpenConns || mc.cfg.MaxIdleConns != d.MaxIdleConns || mc.cfg.ConnMaxLifetime != d.ConnMaxLifetime || mc.cfg.ConnMaxIdleTime != d.ConnMaxIdleTime {
+		t.Fatalf("pool defaults not applied: %+v", mc.cfg)
+	}
+	if err := r.Connect("svc", ConnectionConfig{Driver: "mock", DSN: "ok", MaxOpenConns: 7, MaxIdleConns: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if mc.cfg.MaxOpenConns != 7 || mc.cfg.MaxIdleConns != 3 || mc.cfg.ConnMaxLifetime != d.ConnMaxLifetime {
+		t.Fatalf("set pool not kept: %+v", mc.cfg)
+	}
+}

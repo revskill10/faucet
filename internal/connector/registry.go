@@ -129,6 +129,7 @@ func (r *Registry) retryAfter(serviceName string, cfg ConnectionConfig, g uint64
 
 // connect is Connect, also returning the generation of the change it made.
 func (r *Registry) connect(serviceName string, cfg ConnectionConfig) (uint64, error) {
+	cfg = cfg.withPoolDefaults()
 	r.mu.Lock()
 	r.gen[serviceName]++
 	g := r.gen[serviceName]

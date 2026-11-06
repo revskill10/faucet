@@ -79,6 +79,28 @@ type ConnectionConfig struct {
 	PrivateKeyPath  string // Path to PEM-encoded private key file (Snowflake JWT auth)
 }
 
+// withPoolDefaults fills each unset (zero) pool setting from
+// model.DefaultPoolConfig. A service created through the API with no pool
+// otherwise ran on database/sql's own defaults, two idle connections: under
+// more than two concurrent requests nearly every request opened, and closed, a
+// new database connection.
+func (c ConnectionConfig) withPoolDefaults() ConnectionConfig {
+	d := model.DefaultPoolConfig()
+	if c.MaxOpenConns == 0 {
+		c.MaxOpenConns = d.MaxOpenConns
+	}
+	if c.MaxIdleConns == 0 {
+		c.MaxIdleConns = d.MaxIdleConns
+	}
+	if c.ConnMaxLifetime == 0 {
+		c.ConnMaxLifetime = d.ConnMaxLifetime
+	}
+	if c.ConnMaxIdleTime == 0 {
+		c.ConnMaxIdleTime = d.ConnMaxIdleTime
+	}
+	return c
+}
+
 // Connector is the interface that all database connectors must implement.
 type Connector interface {
 	// Connection management
